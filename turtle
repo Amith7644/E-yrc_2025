@@ -1,0 +1,46 @@
+import turtle
+
+# Setup window
+turtle.setup(600, 600)
+turtle.speed(5)
+
+# Function to draw circle at given center
+def draw_circle(cx, cy, r=50):
+    turtle.penup()
+    turtle.goto(cx, cy - r)
+    turtle.pendown()
+    turtle.circle(r)
+
+# Function to draw line between two points
+def draw_line(x1, y1, x2, y2):
+    turtle.penup()
+    turtle.goto(x1, y1)
+    turtle.pendown()
+    turtle.goto(x2, y2)
+
+# --- Scale factor (100px = 2 units) ---
+scale = 50  # 1 unit = 50 pixels
+
+# Draw 4 propellers (diameter 2 units => radius 1 unit)
+draw_circle(2*scale, 2*scale, 1*scale)
+draw_circle(2*scale, 8*scale, 1*scale)
+draw_circle(8*scale, 8*scale, 1*scale)
+draw_circle(8*scale, 2*scale, 1*scale)
+
+# Draw central diamond (square rotated)
+draw_line(3*scale, 5*scale, 5*scale, 7*scale)
+draw_line(5*scale, 7*scale, 7*scale, 5*scale)
+draw_line(7*scale, 5*scale, 5*scale, 3*scale)
+draw_line(5*scale, 3*scale, 3*scale, 5*scale)
+
+# Connect diamond to propellers
+draw_line(3*scale, 5*scale, 2*scale, 2*scale)
+draw_line(5*scale, 7*scale, 2*scale, 8*scale)
+draw_line(7*scale, 5*scale, 8*scale, 8*scale)
+draw_line(5*scale, 3*scale, 8*scale, 2*scale)
+
+# Return turtle to center (5,5)
+turtle.penup()
+turtle.goto(5*scale, 5*scale)
+
+turtle.done()
