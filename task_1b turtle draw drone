@@ -7,89 +7,43 @@ screen.title("Drone Drawing")
 screen.setup(width=600, height=600)
 
 # Create turtle
-drone = turtle.Turtle()
-drone.speed(5)
+t = turtle.Turtle()
+t.speed(0)
+t.pensize(2)
+t.color("black")
 
 # Function to move turtle without drawing
 def move_to(x, y):
-    drone.penup()
-    drone.goto(x, y)
-    drone.pendown()
-
-# Draw circle (propeller)
-def draw_circle(cx, cy, r=1.0, steps=60):
-    move_to(cx + r, cy)import turtle
-import math
-
-# Setup
-t = turtle.Turtle()
-t.speed(0)
-turtle.bgcolor("blue")
-t.pensize(2)
-t.color("white")
+    t.penup()
+    t.goto(x, y)
+    t.pendown()
 
 # Function to draw circle at (x, y) with radius r
-def draw_circle(x, y, r):
-    t.penup()
-    t.goto(x, y - r)  # move to bottom of circle
+def draw_circle(cx, cy, r):
+    move_to(cx, cy - r)  # move to bottom of circle
     t.pendown()
     t.circle(r)
+
+# Function to draw line between two points
+def draw_line(x1, y1, x2, y2):
+    move_to(x1, y1)
+    t.pendown()
+    t.goto(x2, y2)
 
 # Function to connect diamond corner to circle boundary
 def connect_to_circle(x1, y1, xc, yc, r):
     dx, dy = xc - x1, yc - y1
     dist = math.sqrt(dx*dx + dy*dy)
-    # endpoint at circle boundary
     x2 = x1 + dx * (dist - r) / dist
     y2 = y1 + dy * (dist - r) / dist
-    t.penup()
-    t.goto(x1, y1)
-    t.pendown()
-    t.goto(x2, y2)
+    draw_line(x1, y1, x2, y2)
 
-# Draw diamond (center body)
-diamond = [(0, 60), (60, 0), (0, -60), (-60, 0)]
-t.penup()
-t.goto(diamond[0])
-t.pendown()
-for point in diamond[1:]:
-    t.goto(point)
-t.goto(diamond[0])
-
-# Circle centers (propellers)
-radius = 40
-circles = [(-120, 120), (120, 120), (120, -120), (-120, -120)]
-
-# Draw circles
-for cx, cy in circles:
-    draw_circle(cx, cy, radius)
-
-# Connect diamond corners to circles
-connect_to_circle(-60, 0, -120, -120, radius)  # bottom-left
-connect_to_circle(-60, 0, -120, 120, radius)   # top-left
-connect_to_circle(60, 0, 120, 120, radius)     # top-right
-connect_to_circle(60, 0, 120, -120, radius)    # bottom-right
-
-t.hideturtle()
-turtle.done()
-
-    drone.pendown()
-    drone.setheading(90)
-    drone.circle(r, steps=steps)
-
-# Draw line
-def draw_line(x1, y1, x2, y2):
-    move_to(x1, y1)
-    drone.pendown()
-    drone.goto(x2, y2)
-
-# Scale (so coordinates match your requirement: 1 unit = 50 pixels)
+# Scale factor: 1 unit = 50 pixels
 SCALE = 50
-
 def S(x, y):
-    return x * SCALE - 250, y * SCALE - 250  # shift to center screen
+    return x * SCALE - 250, y * SCALE - 250  # center the drawing
 
-# Draw four propellers (diameter = 2 → radius = 1)
+# Draw four propellers (radius = 1 unit scaled)
 draw_circle(*S(2.0, 2.0), r=SCALE)
 draw_circle(*S(2.0, 8.0), r=SCALE)
 draw_circle(*S(8.0, 8.0), r=SCALE)
@@ -101,14 +55,14 @@ draw_line(*S(5.0, 7.0), *S(7.0, 5.0))
 draw_line(*S(7.0, 5.0), *S(5.0, 3.0))
 draw_line(*S(5.0, 3.0), *S(3.0, 5.0))
 
-# Connect diamond to propellers
-draw_line(*S(3.0, 5.0), *S(2.0, 2.0))
-draw_line(*S(5.0, 7.0), *S(2.0, 8.0))
-draw_line(*S(7.0, 5.0), *S(8.0, 8.0))
-draw_line(*S(5.0, 3.0), *S(8.0, 2.0))
+# Connect diamond corners to propellers
+draw_line(*S(4.0, 4.0), *S(2.0, 2.0))
+draw_line(*S(4.0, 6.0), *S(2.0, 8.0))
+draw_line(*S(6.0, 6.0), *S(8.0, 8.0))
+draw_line(*S(6.0, 4.0), *S(8.0, 2.0))
+
 
 # Return to center (5,5)
 move_to(*S(5.0, 5.0))
 
-# Keep window open
 turtle.done()
