@@ -1,0 +1,43 @@
+module pwm_generator(
+    input clk_3125KHz,
+    input [3:0] duty_cycle,
+    output reg clk_195KHz, 
+    output reg pwm_signal
+);
+
+initial begin
+    clk_195KHz = 0; 
+    pwm_signal = 1;
+end
+//////////////////DO NOT MAKE ANY CHANGES ABOVE THIS LINE //////////////////
+
+reg [3:0] count_195;   // Counter for clk_195KHz division
+reg [3:0] pwm_count;   // Counter for PWM duty cycle
+
+// Generate 195 KHz clock from 3.125 MHz input
+always @(posedge clk_3125KHz) begin
+    if (count_195 == 7) begin
+        clk_195KHz <= ~clk_195KHz;  // Toggle every 8 cycles
+        count_195 <= 0;
+    end else begin
+        count_195 <= count_195 + 1;
+    end
+end
+
+// PWM generator using clk_195KHz
+always @(posedge clk_195KHz) begin
+    if (pwm_count == 15) begin
+        pwm_count <= 0;  // Reset after 16 steps
+    end else begin
+        pwm_count <= pwm_count + 1;
+    end
+
+    if (pwm_count < duty_cycle)
+        pwm_signal <= 1;
+    else
+        pwm_signal <= 0;
+end
+
+//////////////////DO NOT MAKE ANY CHANGES BELOW THIS LINE //////////////////
+
+endmodule
