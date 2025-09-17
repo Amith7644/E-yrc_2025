@@ -1,0 +1,123 @@
+/*
+Module HC_SR04 Ultrasonic Sensor
+
+This module will detect objects present in front of the range, and give the distance in mm.
+
+Input:  clk_50M - 50 MHz clock
+        reset   - reset input signal (Use negative reset)
+        echo_rx - receive echo from the sensor
+
+Output: trig    - trigger sensor for the sensor
+        op      - output signal to indicate object is present.
+        distance_out - distance in mm, if object is present.
+*/
+
+// module Declaration
+module t1b_ultrasonic(
+    input clk_50M, reset, echo_rx,
+    output reg trig,
+    output op,
+    output wire [15:0] distance_out
+);
+
+initial begin
+    trig = 0;
+end
+//////////////////DO NOT MAKE ANY CHANGES ABOVE THIS LINE //////////////////
+
+    // FSM State encoding
+    localparam IDLE              = 3'b000;
+    localparam TRIGGER           = 3'b001;
+    localparam WAIT_FOR_ECHO     = 3'b010;
+    localparam MEASURE_ECHO      = 3'b011;
+    localparam CALC_DISTANCE     = 3'b100;
+    localparam DISPLAY_RESULT    = 3'b101;
+
+    reg [2:0] state, next_state;
+    reg [31:0] counter;
+    reg [31:0] echo_time;
+
+    // Internal registers for outputs
+    reg op_reg;
+    reg [15:0] dist_reg;
+
+    // Connect internal regs to module outputs
+    assign op = op_reg;
+    assign distance_out = dist_reg;
+
+    // State Register
+    always @(posedge clk_50M or negedge reset) begin
+        if (!reset)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+
+    // Next State Logic
+    always @(*) begin
+        case(state)
+            IDLE:           next_state = TRIGGER;
+            TRIGGER:        next_state = WAIT_FOR_ECHO;
+            WAIT_FOR_ECHO:  next_state = echo_rx ? MEASURE_ECHO : WAIT_FOR_ECHO;
+            MEASURE_ECHO:   next_state = echo_rx ? MEASURE_ECHO : CALC_DISTANCE;
+            CALC_DISTANCE:  next_state = DISPLAY_RESULT;
+            DISPLAY_RESULT: next_state = IDLE;
+            default:        next_state = IDLE;
+        endcase
+    end
+
+    // Output Logic & Counters
+    always @(posedge clk_50M or negedge reset) begin
+        if (!reset) begin
+            trig <= 0;
+            counter <= 0;
+            echo_time <= 0;
+            dist_reg <= 0;
+            op_reg <= 0;
+        end else begin
+            case(state)
+                IDLE: begin
+                    trig <= 0;
+                    counter <= 0;
+                    op_reg <= 0;
+                end
+
+                TRIGGER: begin
+                    // 10us HIGH pulse (500 cycles at 50 MHz)
+                    if (counter < 500) begin
+                        trig <= 1;
+                        counter <= counter + 1;
+                    end else begin
+                        trig <= 0;
+                        counter <= 0;
+                    end
+                end
+
+                WAIT_FOR_ECHO: begin
+                    counter <= 0; // reset before counting echo
+                end
+
+                MEASURE_ECHO: begin
+                    counter <= counter + 1; // count echo HIGH duration
+                end
+
+                CALC_DISTANCE: begin
+                    echo_time <= counter;
+                    // Distance in mm:
+                    // (time * 343000 mm/s) / (2 * 50e6 Hz)
+                    dist_reg <= (counter * 343) / 2900;
+                end
+
+                DISPLAY_RESULT: begin
+                    if (dist_reg < 70)
+                        op_reg <= 1;
+                    else
+                        op_reg <= 0;
+                end
+            endcase
+        end
+    end
+
+//////////////////DO NOT MAKE ANY CHANGES BELOW THIS LINE //////////////////
+
+endmodule
