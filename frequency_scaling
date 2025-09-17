@@ -1,0 +1,26 @@
+
+module frequency_scaling (
+    input clk_50M,
+    output reg clk_3125KHz
+);
+
+initial begin
+    clk_3125KHz = 0;
+end
+//////////////////DO NOT MAKE ANY CHANGES ABOVE THIS LINE //////////////////
+
+reg [3:0] count;  // 4-bit counter (0–15)
+
+always @(posedge clk_50M) begin
+    if (count == 7) begin
+        clk_3125KHz <= ~clk_3125KHz;  // Toggle output every 8 cycles
+        count <= 0;
+    end else begin
+        count <= count + 1;
+    end
+end
+
+//////////////////DO NOT MAKE ANY CHANGES BELOW THIS LINE //////////////////
+
+endmodule
+
