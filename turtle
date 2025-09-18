@@ -1,46 +1,214 @@
-import turtle
+#!/usr/bin/env python3
+"""
+KD_1234_task_1b.py
+Example ROS2 node to draw the drone in turtlesim for Task 1B.
 
-# Setup window
-turtle.setup(600, 600)
-turtle.speed(5)
+Usage (after building and sourcing your workspace):
+    ros2 run kd_task_1b KD_1234_task_1b
+"""
+import math
+import time
 
-# Function to draw circle at given center
-def draw_circle(cx, cy, r=50):
-    turtle.penup()
-    turtle.goto(cx, cy - r)
-    turtle.pendown()
-    turtle.circle(r)
+import rclpy
+from rclpy.node import Node
 
-# Function to draw line between two points
-def draw_line(x1, y1, x2, y2):
-    turtle.penup()
-    turtle.goto(x1, y1)
-    turtle.pendown()
-    turtle.goto(x2, y2)
+from geometry_msgs.msg import Twist
+from turtlesim.srv import SetPen, TeleportAbsolute
 
-# --- Scale factor (100px = 2 units) ---
-scale = 50  # 1 unit = 50 pixels
 
-# Draw 4 propellers (diameter 2 units => radius 1 unit)
-draw_circle(2*scale, 2*scale, 1*scale)
-draw_circle(2*scale, 8*scale, 1*scale)
-draw_circle(8*scale, 8*scale, 1*scale)
-draw_circle(8*scale, 2*scale, 1*scale)
+class DroneDrawer(Node):
+    def __init__(self):
+        super().__init__('kd_task_1b_drawer')
+        self.pub = self.create_publisher(Twist, '/turtle1/cmd_vel', 10)
 
-# Draw central diamond (square rotated)
-draw_line(3*scale, 5*scale, 5*scale, 7*scale)
-draw_line(5*scale, 7*scale, 7*scale, 5*scale)
-draw_line(7*scale, 5*scale, 5*scale, 3*scale)
-draw_line(5*scale, 3*scale, 3*scale, 5*scale)
+        # clients for teleport and set_pen
+        self.teleport_client = self.create_client(TeleportAbsolute, '/turtle1/teleport_absolute')
+        self.setpen_client = self.create_client(SetPen, '/turtle1/set_pen')
 
-# Connect diamond to propellers
-draw_line(3*scale, 5*scale, 2*scale, 2*scale)
-draw_line(5*scale, 7*scale, 2*scale, 8*scale)
-draw_line(7*scale, 5*scale, 8*scale, 8*scale)
-draw_line(5*scale, 3*scale, 8*scale, 2*scale)
+        # wait for services
+        while not self.teleport_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for /turtle1/teleport_absolute service...')
+        while not self.setpen_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Waiting for /turtle1/set_pen service...')
 
-# Return turtle to center (5,5)
-turtle.penup()
-turtle.goto(5*scale, 5*scale)
+        # small controller params
+        self.rate_hz = 40.0
+        self.lin_speed = 1.5  # units/sec for straight line moves
+        self.ang_speed = 1.5  # rad/sec for rotation steps
 
-turtle.done()
+        self.get_logger().info("KD Task 1B drawer node ready.")
+
+    # ---------- service helpers ----------
+    def teleport(self, x, y, theta=0.0):
+        req = TeleportAbsolute.Request()
+        req.x = float(x)
+        req.y = float(y)
+        req.theta = float(theta)
+        fut = self.teleport_client.call_async(req)
+        rclpy.spin_until_future_complete(self, fut)
+        return fut.result()
+
+    def set_pen(self, r=0, g=0, b=0, width=2, off=0):
+        # off: 0 draws, 1 disables pen
+        req = SetPen.Request()
+        req.r = int(r)
+        req.g = int(g)
+        req.b = int(b)
+        req.width = int(width)
+        req.off = int(off)
+        fut = self.setpen_client.call_async(req)
+        rclpy.spin_until_future_complete(self, fut)
+        return fut.result()
+
+    # ---------- motion primitives ----------
+    def publish_twist(self, linear=0.0, angular=0.0):
+        tw = Twist()
+        tw.linear.x = float(linear)
+        tw.angular.z = float(angular)
+        self.pub.publish(tw)
+
+    def stop(self):
+        self.publish_twist(0.0, 0.0)
+        # short pause so turtle actually stops
+        time.sleep(0.05)
+
+    def rotate_in_place(self, angular_speed, duration):
+        # publish angular z for duration seconds
+        t_end = time.time() + duration
+        rate_sleep = 1.0 / self.rate_hz
+        while time.time() < t_end:
+            self.publish_twist(0.0, angular_speed)
+            time.sleep(rate_sleep)
+        self.stop()
+
+    def drive_forward_for(self, speed, duration):
+        t_end = time.time() + duration
+        rate_sleep = 1.0 / self.rate_hz
+        while time.time() < t_end:
+            self.publish_twist(speed, 0.0)
+            time.sleep(rate_sleep)
+        self.stop()
+
+    # move in a straight line from current position by teleporting to start (pen off),
+    # enabling pen and driving for computed duration.
+    def draw_line_from_to(self, x_start, y_start, x_end, y_end, pen_on=True):
+        # teleport to start without drawing
+        self.set_pen(off=1)
+        self.teleport(x_start, y_start, 0.0)
+        # compute distance and heading
+        dx = x_end - x_start
+        dy = y_end - y_start
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            return
+        theta = math.atan2(dy, dx)
+        # set orientation
+        self.teleport(x_start, y_start, theta)
+        # enable pen if requested
+        if pen_on:
+            self.set_pen(r=0, g=0, b=0, width=2, off=0)
+        else:
+            self.set_pen(off=1)
+        # drive forward for dist / speed
+        duration = dist / max(0.001, self.lin_speed)
+        self.drive_forward_for(self.lin_speed, duration)
+        # turn pen off after finishing to avoid unintended lines
+        self.set_pen(off=1)
+
+    def draw_circle(self, center_x, center_y, radius, linear_speed=1.0):
+        """
+        Draw a circle by teleporting to the start point (center_x+radius, center_y),
+        setting pen on, then publishing Twist with linear=v and angular=v/r for time T = circumference / v.
+        """
+        # Move to starting point without drawing
+        start_x = center_x + radius
+        start_y = center_y
+        self.set_pen(off=1)
+        self.teleport(start_x, start_y, 0.0)
+        # enable pen
+        self.set_pen(r=0, g=0, b=0, width=2, off=0)
+
+        # Avoid extremely small radius
+        if radius <= 0:
+            return
+
+        v = linear_speed
+        omega = v / radius
+        circumference = 2.0 * math.pi * radius
+        duration = circumference / v
+
+        # Publish twist for duration
+        t_end = time.time() + duration
+        rate_sleep = 1.0 / self.rate_hz
+        while time.time() < t_end:
+            self.publish_twist(v, omega)
+            time.sleep(rate_sleep)
+        self.stop()
+        # disable pen
+        self.set_pen(off=1)
+
+    # ---------- high-level drawing sequence ----------
+    def perform_drawing(self):
+        # Propeller circle parameters
+        prop_centers = [
+            (2.0, 2.0),
+            (2.0, 8.0),
+            (8.0, 8.0),
+            (8.0, 2.0)
+        ]
+        radius = 1.0  # diameter 2.0 => radius 1.0
+
+        # 1) Draw the four propeller circles
+        self.get_logger().info("Drawing 4 propeller circles...")
+        for (cx, cy) in prop_centers:
+            # draw circle at (cx,cy)
+            self.draw_circle(cx, cy, radius, linear_speed=1.0)
+            time.sleep(0.2)
+
+        # 2) Draw the diamond-shaped central frame
+        self.get_logger().info("Drawing diamond frame...")
+        vertices = [
+            (3.0, 5.0),
+            (5.0, 7.0),
+            (7.0, 5.0),
+            (5.0, 3.0)
+        ]
+        # draw edges between consecutive vertices, closing back to first
+        for i in range(len(vertices)):
+            x0, y0 = vertices[i]
+            x1, y1 = vertices[(i + 1) % len(vertices)]
+            self.draw_line_from_to(x0, y0, x1, y1, pen_on=True)
+            time.sleep(0.08)
+
+        # 3) Connect the central body to each propeller (draw arms from center to prop centers)
+        self.get_logger().info("Drawing arms from center to each propeller...")
+        center = (5.0, 5.0)
+        for (cx, cy) in prop_centers:
+            # draw line from center to propeller center
+            self.draw_line_from_to(center[0], center[1], cx, cy, pen_on=True)
+            time.sleep(0.08)
+
+        # 4) Return turtle to center coordinate (5.0, 5.0) and stop with pen off
+        self.get_logger().info("Returning to center (5.0,5.0)...")
+        self.set_pen(off=1)
+        # teleport to center to ensure exact final pose
+        self.teleport(5.0, 5.0, 0.0)
+        self.stop()
+        self.get_logger().info("Drawing complete. Turtle at (5.0, 5.0).")
+
+def main(args=None):
+    rclpy.init(args=args)
+    drawer = DroneDrawer()
+    try:
+        # small delay for safety
+        time.sleep(0.5)
+        drawer.perform_drawing()
+    except KeyboardInterrupt:
+        drawer.get_logger().info('Interrupted by user.')
+    finally:
+        drawer.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
