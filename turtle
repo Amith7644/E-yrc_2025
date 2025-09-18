@@ -1,177 +1,84 @@
 #!/usr/bin/env python3
-"""
-task_1b_2256.py
-ROS2 node to draw the drone in turtlesim for Task 1B.
-
-Usage (after building and sourcing your workspace):
-    ros2 run kd_task_1b task_1b_2256
-"""
+import rclpy
+from rclpy.node import Node
+from turtlesim.srv import TeleportAbsolute
 import math
 import time
 
-import rclpy
-from rclpy.node import Node
-
-from geometry_msgs.msg import Twist
-from turtlesim.srv import SetPen, TeleportAbsolute
-
+TEAM_ID = "2256"
 
 class DroneDrawer(Node):
     def __init__(self):
-        super().__init__('task_1b_2256_node')
-        self.pub = self.create_publisher(Twist, '/turtle1/cmd_vel', 10)
-
-        # clients for teleport and set_pen
-        self.teleport_client = self.create_client(TeleportAbsolute, '/turtle1/teleport_absolute')
-        self.setpen_client = self.create_client(SetPen, '/turtle1/set_pen')
-
-        # wait for services
-        while not self.teleport_client.wait_for_service(timeout_sec=1.0):
+        super().__init__('task_1b_' + TEAM_ID)
+        self.cli = self.create_client(TeleportAbsolute, '/turtle1/teleport_absolute')
+        while not self.cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Waiting for /turtle1/teleport_absolute service...')
-        while not self.setpen_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for /turtle1/set_pen service...')
 
-        # small controller params
-        self.rate_hz = 40.0
-        self.lin_speed = 1.5
-        self.ang_speed = 1.5
-
-        self.get_logger().info("Task 1B drawer node ready.")
-
-    # ---------- service helpers ----------
     def teleport(self, x, y, theta=0.0):
         req = TeleportAbsolute.Request()
         req.x = float(x)
         req.y = float(y)
         req.theta = float(theta)
-        fut = self.teleport_client.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
-        return fut.result()
+        self.cli.call_async(req)
+        time.sleep(0.1)
 
-    def set_pen(self, r=0, g=0, b=0, width=2, off=0):
-        req = SetPen.Request()
-        req.r = int(r)
-        req.g = int(g)
-        req.b = int(b)
-        req.width = int(width)
-        req.off = int(off)
-        fut = self.setpen_client.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
-        return fut.result()
+    def draw_circle(self, cx, cy, r=1.0, steps=36):
+        for i in range(steps+1):
+            angle = 2 * math.pi * i / steps
+            x = cx + r * math.cos(angle)
+            y = cy + r * math.sin(angle)
+            self.teleport(x, y)
 
-    # ---------- motion primitives ----------
-    def publish_twist(self, linear=0.0, angular=0.0):
-        tw = Twist()
-        tw.linear.x = float(linear)
-        tw.angular.z = float(angular)
-        self.pub.publish(tw)
+    def draw_line_to_circle(self, x1, y1, cx, cy, r):
+        # vector from circle center → diamond vertex
+        dx = x1 - cx
+        dy = y1 - cy
+        dist = math.sqrt(dx*dx + dy*dy)
+        # scale to radius
+        x_end = cx + dx * r / dist
+        y_end = cy + dy * r / dist
+        # draw line from diamond vertex → circle edge
+        steps = int(dist*10)
+        for i in range(steps+1):
+            t = i / steps
+            x = x1 + t * (x_end - x1)
+            y = y1 + t * (y_end - y1)
+            self.teleport(x, y)
 
-    def stop(self):
-        self.publish_twist(0.0, 0.0)
-        time.sleep(0.05)
+    def draw_drone(self):
+        # Circle centers and radius
+        r = 1.0
+        circles = [(2,2), (2,8), (8,8), (8,2)]
+        for (cx, cy) in circles:
+            self.draw_circle(cx, cy, r)
 
-    def drive_forward_for(self, speed, duration):
-        t_end = time.time() + duration
-        rate_sleep = 1.0 / self.rate_hz
-        while time.time() < t_end:
-            self.publish_twist(speed, 0.0)
-            time.sleep(rate_sleep)
-        self.stop()
+        # Diamond vertices
+        diamond = [(3,5), (5,7), (7,5), (5,3)]
+        for (x,y) in diamond:
+            self.teleport(x,y)
 
-    def draw_line_from_to(self, x_start, y_start, x_end, y_end, pen_on=True):
-        self.set_pen(off=1)
-        self.teleport(x_start, y_start, 0.0)
-        dx = x_end - x_start
-        dy = y_end - y_start
-        dist = math.hypot(dx, dy)
-        if dist < 1e-6:
-            return
-        theta = math.atan2(dy, dx)
-        self.teleport(x_start, y_start, theta)
-        if pen_on:
-            self.set_pen(r=0, g=0, b=0, width=2, off=0)
-        else:
-            self.set_pen(off=1)
-        duration = dist / max(0.001, self.lin_speed)
-        self.drive_forward_for(self.lin_speed, duration)
-        self.set_pen(off=1)
-
-    def draw_circle(self, center_x, center_y, radius, linear_speed=1.0):
-        start_x = center_x + radius
-        start_y = center_y
-        self.set_pen(off=1)
-        self.teleport(start_x, start_y, 0.0)
-        self.set_pen(r=0, g=0, b=0, width=2, off=0)
-
-        if radius <= 0:
-            return
-
-        v = linear_speed
-        omega = v / radius
-        circumference = 2.0 * math.pi * radius
-        duration = circumference / v
-
-        t_end = time.time() + duration
-        rate_sleep = 1.0 / self.rate_hz
-        while time.time() < t_end:
-            self.publish_twist(v, omega)
-            time.sleep(rate_sleep)
-        self.stop()
-        self.set_pen(off=1)
-
-    # ---------- drawing sequence ----------
-    def perform_drawing(self):
-        prop_centers = [
-            (2.0, 2.0),
-            (2.0, 8.0),
-            (8.0, 8.0),
-            (8.0, 2.0)
+        # Connect diamond to circles properly
+        connections = [
+            ((3,5),(2,2)),  # left → bottom-left
+            ((3,5),(2,8)),  # left → top-left
+            ((7,5),(8,2)),  # right → bottom-right
+            ((7,5),(8,8)),  # right → top-right
+            ((5,7),(2,8)),  # top → top-left
+            ((5,7),(8,8)),  # top → top-right
+            ((5,3),(2,2)),  # bottom → bottom-left
+            ((5,3),(8,2)),  # bottom → bottom-right
         ]
-        radius = 1.0
+        for (vx,vy),(cx,cy) in connections:
+            self.draw_line_to_circle(vx, vy, cx, cy, r)
 
-        self.get_logger().info("Drawing propellers...")
-        for (cx, cy) in prop_centers:
-            self.draw_circle(cx, cy, radius, linear_speed=1.0)
-            time.sleep(0.2)
-
-        self.get_logger().info("Drawing diamond frame...")
-        vertices = [
-            (3.0, 5.0),
-            (5.0, 7.0),
-            (7.0, 5.0),
-            (5.0, 3.0)
-        ]
-        for i in range(len(vertices)):
-            x0, y0 = vertices[i]
-            x1, y1 = vertices[(i + 1) % len(vertices)]
-            self.draw_line_from_to(x0, y0, x1, y1, pen_on=True)
-            time.sleep(0.08)
-
-        self.get_logger().info("Connecting arms...")
-        center = (5.0, 5.0)
-        for (cx, cy) in prop_centers:
-            self.draw_line_from_to(center[0], center[1], cx, cy, pen_on=True)
-            time.sleep(0.08)
-
-        self.get_logger().info("Returning to center (5.0,5.0)...")
-        self.set_pen(off=1)
-        self.teleport(5.0, 5.0, 0.0)
-        self.stop()
-        self.get_logger().info("Drawing complete ✅")
-
+        # Return to center
+        self.teleport(5,5)
 
 def main(args=None):
     rclpy.init(args=args)
-    drawer = DroneDrawer()
-    try:
-        time.sleep(0.5)
-        drawer.perform_drawing()
-    except KeyboardInterrupt:
-        drawer.get_logger().info('Interrupted.')
-    finally:
-        drawer.destroy_node()
-        rclpy.shutdown()
-
+    node = DroneDrawer()
+    node.draw_drone()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
