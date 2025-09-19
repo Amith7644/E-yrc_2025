@@ -9,125 +9,86 @@ import time
 
 class DroneDrawer(Node):
     def __init__(self):
-        super().__init__('task_1b_2256_node')
+        super().__init__('drone_drawer')
+        self.pub = self.create_publisher(Twist, '/turtle1/cmd_vel', 10)
 
-        # Publisher to move turtle
-        self.cmd_pub = self.create_publisher(Twist, '/turtle1/cmd_vel', 10)
+        # Service clients
+        self.cli_tp = self.create_client(TeleportAbsolute, '/turtle1/teleport_absolute')
+        self.cli_pen = self.create_client(SetPen, '/turtle1/set_pen')
 
-        # Services to teleport and pen control
-        self.teleport_client = self.create_client(TeleportAbsolute, '/turtle1/teleport_absolute')
-        self.pen_client = self.create_client(SetPen, '/turtle1/set_pen')
+        while not self.cli_tp.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('waiting for teleport service...')
+        while not self.cli_pen.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('waiting for set_pen service...')
 
-        while not self.teleport_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for teleport service...')
-        while not self.pen_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for set_pen service...')
-
-        self.rate = 40.0
-        self.lin_speed = 2.0
-
-        self.get_logger().info("Task 1B ROS2 node ready!")
-
-    # ---------------- Helpers ----------------
-    def set_pen(self, r=0, g=0, b=0, width=2, off=0):
-        req = SetPen.Request()
-        req.r, req.g, req.b, req.width, req.off = r, g, b, width, off
-        fut = self.pen_client.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
+        time.sleep(1)
 
     def teleport(self, x, y, theta=0.0):
         req = TeleportAbsolute.Request()
         req.x, req.y, req.theta = float(x), float(y), float(theta)
-        fut = self.teleport_client.call_async(req)
-        rclpy.spin_until_future_complete(self, fut)
+        self.cli_tp.call_async(req)
+        time.sleep(0.2)
 
-    def publish_twist(self, linear=0.0, angular=0.0):
-        msg = Twist()
-        msg.linear.x = linear
-        msg.angular.z = angular
-        self.cmd_pub.publish(msg)
+    def set_pen(self, r=255, g=255, b=255, width=2, off=0):
+        req = SetPen.Request()
+        req.r, req.g, req.b = r, g, b
+        req.width = width
+        req.off = off
+        self.cli_pen.call_async(req)
+        time.sleep(0.1)
 
-    def stop(self):
-        self.publish_twist(0.0, 0.0)
-        time.sleep(0.05)
+    def draw_circle(self, radius=1.0):
+        vel = Twist()
+        vel.linear.x = 1.0
+        vel.angular.z = 1.0 / radius
+        t0 = time.time()
+        duration = 2 * math.pi * radius / vel.linear.x
+        while time.time() - t0 < duration:
+            self.pub.publish(vel)
+            time.sleep(0.05)
+        self.pub.publish(Twist())
 
-    # ---------------- Drawing functions ----------------
-    def draw_line(self, x1, y1, x2, y2):
-        """Teleport to start, then drive straight to end."""
-        dx, dy = x2 - x1, y2 - y1
-        dist = math.hypot(dx, dy)
-        theta = math.atan2(dy, dx)
+    def execute(self):
+        # Step 1: Draw four propellers (4 circles)
+        centers = [(2.0, 2.0), (2.0, 8.0), (8.0, 8.0), (8.0, 2.0)]
+        for (cx, cy) in centers:
+            self.set_pen(off=1)
+            self.teleport(cx + 1.0, cy, 0.0)
+            self.set_pen(off=0)
+            self.draw_circle(radius=1.0)
 
+        # Step 2: Draw central diamond
+        frame_pts = [(3.0, 5.0), (5.0, 7.0), (7.0, 5.0), (5.0, 3.0), (3.0, 5.0)]
         self.set_pen(off=1)
-        self.teleport(x1, y1, theta)
+        self.teleport(*frame_pts[0])
         self.set_pen(off=0)
+        for (x, y) in frame_pts[1:]:
+            self.teleport(x, y)
 
-        duration = dist / self.lin_speed
-        t_end = time.time() + duration
-        while time.time() < t_end:
-            self.publish_twist(self.lin_speed, 0.0)
-            time.sleep(1.0 / self.rate)
-        self.stop()
-        self.set_pen(off=1)
+        # Step 3: Connect frame to propellers
+        connections = [
+            ((3.0, 5.0), (2.0, 2.0)),
+            ((5.0, 7.0), (2.0, 8.0)),
+            ((7.0, 5.0), (8.0, 8.0)),
+            ((5.0, 3.0), (8.0, 2.0))
+        ]
+        for (start, end) in connections:
+            self.set_pen(off=1)
+            self.teleport(*start)
+            self.set_pen(off=0)
+            self.teleport(*end)
 
-    def draw_circle(self, cx, cy, r):
-        """Draw circle using Twist velocity commands."""
-        # Move to starting point
-        self.set_pen(off=1)
-        self.teleport(cx + r, cy, 0.0)
-        self.set_pen(off=0)
-
-        v = 1.5
-        omega = v / r
-        duration = 2 * math.pi * r / v
-
-        t_end = time.time() + duration
-        while time.time() < t_end:
-            self.publish_twist(v, omega)
-            time.sleep(1.0 / self.rate)
-        self.stop()
-        self.set_pen(off=1)
-
-    # ---------------- Main Drone Drawing ----------------
-    def perform_drawing(self):
-        SCALE = 1.0  # ROS2 turtlesim already in units
-
-        # 1. Draw four propellers
-        self.draw_circle(2.0, 2.0, 1.0)
-        self.draw_circle(2.0, 8.0, 1.0)
-        self.draw_circle(8.0, 8.0, 1.0)
-        self.draw_circle(8.0, 2.0, 1.0)
-
-        # 2. Central diamond
-        self.draw_line(3.0, 5.0, 5.0, 7.0)
-        self.draw_line(5.0, 7.0, 7.0, 5.0)
-        self.draw_line(7.0, 5.0, 5.0, 3.0)
-        self.draw_line(5.0, 3.0, 3.0, 5.0)
-
-        # 3. Connect diamond midpoints to propellers
-        self.draw_line(4.0, 4.0, 2.0, 2.0)
-        self.draw_line(4.0, 6.0, 2.0, 8.0)
-        self.draw_line(6.0, 6.0, 8.0, 8.0)
-        self.draw_line(6.0, 4.0, 8.0, 2.0)
-
-        # 4. Return to center
+        # Step 4: Return turtle to center
         self.set_pen(off=1)
         self.teleport(5.0, 5.0, 0.0)
-        self.stop()
-        self.get_logger().info("Drawing finished ✅ at (5,5)")
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = DroneDrawer()
-    try:
-        time.sleep(0.5)
-        node.perform_drawing()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    node.execute()
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':
