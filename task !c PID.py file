@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""
+pico_controller_PID.py
+PID controller for Swift Pico using WhyCon feedback.
+
+- Subscribes: /whycon/poses (geometry_msgs/PoseArray)
+- Publishes:  /drone_command (swift_msgs/SwiftMsgs)
+             /pos_error   (error_msg/Error) -- x/y/z errors set in fields if available
+
+Behavior:
+- PID on x,y -> desired horizontal acceleration -> mapped to roll/pitch angles
+- PID on z -> thrust (force) -> mapped to RC throttle
+- Maps angles to rc_roll / rc_pitch via linear_map and thrust to rc_throttle via force_to_throttle_linear
+- Monitors hold: reach desired_state [-7,0,20] within margin ±0.4m for hold_time (10s) -> logs success
+"""
+import math
+import time
+import numpy as np
+
+import rclpy
+from rclpy.node import Node
+
+from geometry_msgs.msg import PoseArray
+from swift_msgs.msg import SwiftMsgs
+from error_msg.msg import Error
+from controller_msg.msg import PIDTune  # optional tuner (used for altitude PID updates)
+
+# RC limits (from original files)
+MIN_ROLL = 1000
+BASE_ROLL = 1500
+MAX_ROLL = 2000
+
+MIN_PITCH = 1000
+BASE_PITCH = 1500
+MAX_PITCH = 2000
+
+MIN_THROTTLE = 1800
+BASE_THROTTLE = 1500
+MAX_THROTTLE = 2000
+
+class Swift_Pico_PID(Node):
+    def __init__(self):
+        super().__init__('pico_controller_pid')
+
+        # --- Parameters (quick-to-tune) ---
+        self.desired_state = np.array([-7.0, 0.0, 20.0])  # target [x, y, z]
+        self.g = 9.81
+        self.m = 0.152  # drone mass (kg), used for thrust mapping; tune if needed
+
+        # PID gains for x,y (horizontal) - these compute desired acceleration (m/s^2)
+        self.kp_xy = 1.0
+        self.ki_xy = 0.0
+        self.kd_xy = 0.5
+
+        # PID gains for z (altitude) - this computes thrust force (N)
+        self.kp_z = 5.0
+        self.ki_z = 0.0
+        self.kd_z = 2.0
+
+        # max tilt (deg) and conversion
+        self.max_tilt_deg = 20.0
+        self.max_tilt_rad = math.radians(self.max_tilt_deg)
+
+        # sample time
+        self.sample_time = 0.033  # seconds (~30 Hz)
+
+        # hold requirement
+        self.hold_margin = 0.4  # meters
+        self.hold_time = 10.0   # seconds
+
+        # internal state
+        self.current_pos = np.zeros(3)  # x,y,z
+        self.prev_pos = np.zeros(3)
+        self.got_pose = False
+
+        # PID integrators / previous errors
+        self.integral_xy = np.zeros(2)
+        self.prev_err_xy = np.zeros(2)
+
+        self.integral_z = 0.0
+        self.prev_err_z = 0.0
+
+        # hold detection
+        self.in_margin_since = None
+        self.succeeded = False
+
+        # RC cmd
+        self.cmd = SwiftMsgs()
+        self.cmd.rc_roll = BASE_ROLL
+        self.cmd.rc_pitch = BASE_PITCH
+        self.cmd.rc_yaw = 1500
+        self.cmd.rc_throttle = BASE_THROTTLE
+
+        # publishers / subscribers
+        self.command_pub = self.create_publisher(SwiftMsgs, '/drone_command', 10)
+        self.pos_error_pub = self.create_publisher(Error, '/pos_error', 10)
+        self.create_subscription(PoseArray, '/whycon/poses', self.whycon_callback, 1)
+        # optional PID tuner for altitude (topic from original)
+        try:
+            self.create_subscription(PIDTune, '/throttle_pid', self.altitude_set_pid, 1)
+        except Exception:
+            pass
+
+        # arm first (keeps original arm/disarm style)
+        self.arm()
+
+        # timer
+        self.create_timer(self.sample_time, self.controller)
+
+        self.get_logger().info('PID controller ready. Setpoint: %s' % str(self.desired_state.tolist()))
+
+    # --- helper mappings ---
+    def linear_map(self, x_angle_rad):
+        # maps radians to rc stick (empirical linear mapping)
+        # linear_map in original: y = ((1000/math.pi) * x) + 1500
+        return int(np.clip(((1000.0 / math.pi) * x_angle_rad) + 1500.0, MIN_ROLL, MAX_ROLL))
+
+    def force_to_throttle_linear(self, thrust_force):
+        # thrust_force: in Newtons (positive -> increase thrust)
+        hover_thrust = self.m * self.g
+        max_thrust = 2.0 * hover_thrust
+        total_thrust = hover_thrust + thrust_force
+        # avoid negative
+        if total_thrust < 0.0:
+            total_thrust = 0.0
+        max_thrust = 2.0 * hover_thrust
+        # slope from hover to max
+        if max_thrust - hover_thrust == 0:
+            slope = 0.0
+        else:
+            slope = (MAX_THROTTLE - BASE_THROTTLE) / (max_thrust - hover_thrust)
+        throttle = BASE_THROTTLE + slope * (total_thrust - hover_thrust)
+        return int(np.clip(throttle, MIN_THROTTLE, MAX_THROTTLE))
+
+    # --- arm/disarm ---
+    def disarm(self):
+        self.cmd.rc_roll = MIN_ROLL
+        self.cmd.rc_pitch = MIN_PITCH
+        self.cmd.rc_yaw = 1000
+        self.cmd.rc_throttle = MIN_THROTTLE
+        try:
+            self.command_pub.publish(self.cmd)
+        except Exception:
+            pass
+
+    def arm(self):
+        self.disarm()
+        self.cmd.rc_roll = BASE_ROLL
+        self.cmd.rc_pitch = BASE_PITCH
+        self.cmd.rc_yaw = 1500
+        self.cmd.rc_throttle = BASE_THROTTLE
+        try:
+            self.command_pub.publish(self.cmd)
+        except Exception:
+            pass
+
+    # --- subscribers callbacks ---
+    def whycon_callback(self, msg: PoseArray):
+        if msg and len(msg.poses) > 0:
+            p = msg.poses[0].position
+            # store previous for numerical derivative
+            self.prev_pos = self.current_pos.copy()
+            self.current_pos = np.array([p.x, p.y, p.z])
+            self.got_pose = True
+
+    def altitude_set_pid(self, alt):
+        # optional dynamic adjusting from tuner
+        self.kp_z = alt.kp * 0.03 if hasattr(alt, 'kp') else self.kp_z
+        self.ki_z = alt.ki * 0.008 if hasattr(alt, 'ki') else self.ki_z
+        self.kd_z = alt.kd * 0.6 if hasattr(alt, 'kd') else self.kd_z
+
+    # --- main controller loop ---
+    def controller(self):
+        if not self.got_pose:
+            self.get_logger().debug('Waiting for WhyCon pose...')
+            return
+
+        # compute errors
+        err = self.desired_state - self.current_pos  # [ex, ey, ez]
+        err_x, err_y, err_z = err[0], err[1], err[2]
+
+        # X/Y PID -> desired acceleration (ax, ay)
+        # integrate and derivative for x,y
+        self.integral_xy[0] += err_x * self.sample_time
+        self.integral_xy[1] += err_y * self.sample_time
+
+        der_x = (err_x - self.prev_err_xy[0]) / self.sample_time
+        der_y = (err_y - self.prev_err_xy[1]) / self.sample_time
+
+        acc_x = self.kp_xy * err_x + self.ki_xy * self.integral_xy[0] + self.kd_xy * der_x
+        acc_y = self.kp_xy * err_y + self.ki_xy * self.integral_xy[1] + self.kd_xy * der_y
+
+        self.prev_err_xy[0] = err_x
+        self.prev_err_xy[1] = err_y
+
+        # Z PID -> thrust force (N)
+        self.integral_z += err_z * self.sample_time
+        der_z = (err_z - self.prev_err_z) / self.sample_time
+        thrust = self.kp_z * err_z + self.ki_z * self.integral_z + self.kd_z * der_z
+        self.prev_err_z = err_z
+
+        # Map horizontal accelerations to tilt angles:
+        # small-angle approx: angle = atan(acc / g)
+        # sign convention: pitch (nose) controls x; roll controls y
+        pitch = math.atan2(-acc_x, self.g)  # negative sign because nose-down produces +x accel
+        roll = math.atan2(acc_y, self.g)
+
+        # clamp tilt
+        pitch = float(np.clip(pitch, -self.max_tilt_rad, self.max_tilt_rad))
+        roll = float(np.clip(roll, -self.max_tilt_rad, self.max_tilt_rad))
+
+        # map to RC values
+        rc_roll = self.linear_map(roll)
+        rc_pitch = self.linear_map(pitch)
+        rc_throttle = self.force_to_throttle_linear(thrust)
+
+        # update and publish
+        self.cmd.rc_roll = int(rc_roll)
+        self.cmd.rc_pitch = int(rc_pitch)
+        self.cmd.rc_throttle = int(rc_throttle)
+        # keep yaw neutral
+        self.cmd.rc_yaw = 1500
+
+        try:
+            self.command_pub.publish(self.cmd)
+        except Exception:
+            pass
+
+        # publish pos error
+        pos_error = Error()
+        # Try to be robust: set commonly named fields if they exist
+        try:
+            pos_error.x_error = float(err_x)
+            pos_error.y_error = float(err_y)
+            pos_error.z_error = float(err_z)
+        except Exception:
+            # fallback to possible names used in templates
+            try:
+                pos_error.pitch_error = float(err_x)
+                pos_error.roll_error = float(err_y)
+                pos_error.throttle_error = float(err_z)
+            except Exception:
+                # ignore if message doesn't match
+                pass
+        try:
+            self.pos_error_pub.publish(pos_error)
+        except Exception:
+            pass
+
+        # Hold monitoring
+        in_margin = (abs(err_x) <= self.hold_margin and
+                     abs(err_y) <= self.hold_margin and
+                     abs(err_z) <= self.hold_margin)
+        now = time.time()
+        if in_margin:
+            if self.in_margin_since is None:
+                self.in_margin_since = now
+            else:
+                if (now - self.in_margin_since) >= self.hold_time and not self.succeeded:
+                    self.succeeded = True
+                    self.get_logger().info('SUCCESS: Held within ±%.2fm for %.1fs at setpoint %s' %
+                                           (self.hold_margin, self.hold_time, str(self.desired_state.tolist())))
+        else:
+            self.in_margin_since = None
+
+        # occasional logging (1s)
+        if int(now) % 1 == 0:
+            self.get_logger().info('pos: [%.2f, %.2f, %.2f] err: [%.2f, %.2f, %.2f] roll=%.1f° pitch=%.1f° throttle=%d' %
+                                   (self.current_pos[0], self.current_pos[1], self.current_pos[2],
+                                    err_x, err_y, err_z, math.degrees(roll), math.degrees(pitch), rc_throttle))
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = Swift_Pico_PID()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('Keyboard interrupt - shutting down')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
